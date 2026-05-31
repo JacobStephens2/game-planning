@@ -530,12 +530,12 @@ Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` �
 
 ## Migration Sequence (Milestones)
 
-### Milestone 1 — Scaffold
-- `npx create-next-app@latest game-planning --typescript --tailwind --eslint --app --src-dir no --import-alias "@/*"`
-- Install shadcn/ui: `npx shadcn@latest init`
-- Install dependencies: `prisma`, `@prisma/client`, `next-auth@beta`, `zod`, `react-hook-form`, `@hookform/resolvers`, `bcryptjs`, `resend`
-- Configure `tsconfig.json`: `"strict": true`
-- Verify: `npm run dev` serves `localhost:3000`
+### Milestone 1 — Scaffold ✅ (done 2026-05-31)
+- ~~`npx create-next-app@latest game-planning --typescript --tailwind --eslint --app --src-dir no --import-alias "@/*"`~~ — actual flag is `--no-src-dir` (not `--src-dir no`). Ran as: `create-next-app@latest . --ts --tailwind --eslint --app --no-src-dir --import-alias "@/*" --use-npm --yes`
+- shadcn/ui initialized (`npx shadcn@latest init -d`) — New York style, on Tailwind v4; created `components/ui/button.tsx`, `lib/utils.ts`, `components.json`
+- Dependencies installed: `prisma`, `@prisma/client`, `next-auth@beta`, `zod`, `react-hook-form`, `@hookform/resolvers`, `bcryptjs`, `resend` (+ `@types/bcryptjs` dev). See [Dependency Reference](#dependency-reference) for the resolved versions — several majors are ahead of the original assumptions.
+- `tsconfig.json` `"strict": true` confirmed (create-next-app default); import alias `@/*` confirmed; `app/` at repo root (no `src/`).
+- **Verified:** `npm run build` compiles cleanly on Next 16.2.6 (`✓ Compiled successfully`).
 
 ### Milestone 2 — Database
 - Write `prisma/schema.prisma` exactly as specified above
@@ -592,20 +592,31 @@ Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` �
 
 ## Dependency Reference
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `next` | latest (15.x) | Framework |
-| `react`, `react-dom` | 19.x | UI runtime |
-| `typescript` | 5.x | Language |
-| `prisma` | 6.x | ORM + migrations |
-| `@prisma/client` | 6.x | DB client |
-| `next-auth` | 5.x (beta) | Authentication |
-| `zod` | 3.x | Validation schemas |
-| `react-hook-form` | 7.x | Form state |
-| `@hookform/resolvers` | 3.x | RHF + Zod bridge |
-| `bcryptjs` | 2.x | Password hashing |
-| `@types/bcryptjs` | 2.x | TS types |
-| `resend` | 4.x | Transactional email |
-| `tailwindcss` | 4.x | Styling |
-| `shadcn/ui` | latest | Component library |
+The table below is the **actually-installed** stack as of the Milestone-1 scaffold (2026-05-31), not the originally-assumed versions. Several majors landed ahead of this plan's first draft — see the breaking-change notes that follow.
+
+| Package | Installed | Originally assumed | Purpose |
+|---------|-----------|--------------------|---------|
+| `next` | **16.2.6** | 15.x | Framework |
+| `react`, `react-dom` | 19.2.4 | 19.x | UI runtime |
+| `typescript` | 5.x | 5.x | Language |
+| `prisma` | **7.8.0** | 6.x | ORM + migrations |
+| `@prisma/client` | **7.8.0** | 6.x | DB client |
+| `next-auth` | 5.0.0-beta.31 | 5.x (beta) | Authentication |
+| `zod` | **4.4.3** | 3.x | Validation schemas |
+| `react-hook-form` | 7.77.0 | 7.x | Form state |
+| `@hookform/resolvers` | **5.4.0** | 3.x | RHF + Zod bridge |
+| `bcryptjs` | **3.0.3** | 2.x | Password hashing |
+| `@types/bcryptjs` | 2.x | 2.x | TS types (bcryptjs 3 may bundle its own — verify before relying on `@types`) |
+| `resend` | **6.12.4** | 4.x | Transactional email |
+| `tailwindcss` | 4.x | 4.x | Styling (v4 — CSS-first config, no `tailwind.config.ts` by default) |
+| `shadcn/ui` | latest | latest | Component library (New York style, on Tailwind v4) |
+
+> ### ⚠️ Version-drift notes for implementation
+> The example snippets earlier in this doc were written against the *originally-assumed* versions. Before each milestone, reconcile against the installed majors below. The scaffold also ships an `AGENTS.md` warning that "this is NOT the Next.js you know" — consult `node_modules/next/dist/docs/` for the installed version's conventions.
+>
+> - **Next 16 (not 15):** App Router APIs shifted. `headers()`/`cookies()`/`params`/`searchParams` are async — `await` them (the `signUp` snippet already does `await headers()`). Verify the Auth.js v5 ↔ Next 16 integration; route handler and middleware signatures may differ from v15 examples.
+> - **Prisma 7 (not 6):** Client generation/output conventions changed (custom `output` path on the generator is now expected; the bare `prisma-client-js` provider in the schema block above may need updating). Run `npx prisma init`/`generate` and follow its guidance rather than hand-copying the v6 schema header verbatim.
+> - **Zod 4 (not 3):** `z.string().email(...)` is deprecated in favor of top-level `z.email(...)`; `.flatten()` on errors still exists but `z.treeifyError`/`z.flattenError` are the v4-native forms. The validation snippets work but should be modernized when written.
+> - **bcryptjs 3 (not 2):** API (`hash`/`compare`) is unchanged and remains compatible with PHP's `PASSWORD_BCRYPT` hashes; the package is now ESM-friendly. The `@types/bcryptjs` dependency may be redundant.
+> - **Tailwind v4:** create-next-app produced a CSS-first setup (`@import "tailwindcss"` in `globals.css`, `@tailwindcss/postcss`), so there is no `tailwind.config.ts` — adjust the [Project Structure](#project-structure) tree accordingly.
 
