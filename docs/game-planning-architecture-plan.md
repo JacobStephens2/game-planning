@@ -1,0 +1,611 @@
+# Game Planning App — Re-platform Architecture Plan
+**Migration: PHP/MySQL REST API + Vanilla-JS PWA → Next.js (App Router) + TypeScript**
+
+---
+
+## Executive Summary
+
+This document is the authoritative architecture plan for re-platforming the Game Planning App from its current split LAMP architecture (a PHP/MySQL REST API at `game-planning-api` and a separate vanilla-JS PWA at `game-planning-web-app-ui`) into a single, cohesive Next.js (App Router) TypeScript monorepo. All existing functionality is preserved exactly. No new features are added in v1.
+
+The key outcomes of this migration are:
+- End-to-end type safety (Zod schemas inferred → Prisma types shared across client and server)
+- A single deployable unit on Vercel + managed Postgres
+- Replacement of JWT-in-cookie auth with Auth.js (NextAuth) sessions
+- Replacement of PHP validation functions with Zod schemas
+- Replacement of vanilla HTML/CSS/JS with Tailwind CSS + shadcn/ui
+
+---
+
+## Source Code Audit
+
+### Existing Data Model (from `classes/`)
+
+The PHP classes reveal the precise database columns to reproduce in Prisma.
+
+#### `users` table
+Columns: `id`, `email`, `hashed_password`, `user_group` (integer; `'1'` = standard user, implied admin tier exists)
+
+```php
+// user.class.php
+static protected $db_columns = ['id', 'email', 'user_group', 'hashed_password'];
+```
+
+Password hashing: `password_hash($password, PASSWORD_BCRYPT)` → bcrypt. The new stack uses argon2id (via Auth.js / `@auth/prisma-adapter` with argon2) or bcrypt via `bcryptjs` — both are compatible with `password_verify()`-style verification.
+
+#### `games_test` table (production table name)
+Columns: `id`, `title`, `description`, `user_id`
+
+```php
+// game.class.php
+static protected $table_name = 'games_test';
+static protected $db_columns = ['id', 'title', 'description', 'user_id'];
+```
+
+> ⚠️ **Flag:** The table name is `games_test`, not `games`. Confirm whether this is intentional production naming before writing `schema.prisma`. In Prisma, `@@map("games_test")` preserves the name on an existing database; on a fresh Postgres migration the new table can be named `games` cleanly.
+
+No `created_at` / `updated_at` columns exist in the current schema. Prisma's `@default(now())` and `@updatedAt` can be added for free during migration — this is not a new feature, it is good hygiene and does not change any existing behavior.
+
+### Existing API Endpoints (from `public/`)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/sign-up` | None | Create user; notify admin via Mandrill |
+| POST | `/login` | None | Verify credentials; set `access_token` JWT cookie. ⚠️ The **JWT `exp` is 60 minutes**, but the cookie `Max-Age` is 7 days — so the cookie outlives the token and the effective session is ~60 minutes. See [Session Lifetime](#session-lifetime-parity). |
+| POST | `/logout` | None | Expire `access_token` cookie |
+| GET | `/games/read` | JWT cookie | List all games scoped to authenticated user |
+| GET | `/game/read?id=` | JWT cookie | Read single game (owner check) |
+| POST | `/game/create` | JWT cookie | Create game from `$_POST['game']` array |
+| POST | `/game/update?id=` | JWT cookie | Update game fields (owner check) |
+| POST | `/game/delete?id=` | JWT cookie | Delete game (owner check) |
+
+### Existing UI Routes (from `game-planning-web-app-ui/`)
+
+| File | Description |
+|------|-------------|
+| `index.html` | Entry / dashboard |
+| `login.html` | Login form |
+| `sign-up.html` | Registration form |
+| `games/read.html` | Browse all user games |
+| `game/create.html` | Create game form |
+| `game/edit.html` | Edit game form |
+| `game/delete.html` | Delete confirmation |
+
+### Email Notification (from `public/sign-up.php`)
+
+Admin notification on new user registration uses **Mandrill** (Mailchimp's transactional API). The new stack replaces this with **Resend** (simpler API, modern SDK, free tier sufficient). The notification content is preserved:
+- Subject: `GamePlan — New Account Created`
+- Body: new user email, timestamp, device/user-agent
+
+Environment variables to mirror: `MANDRILL_API_KEY` → `RESEND_API_KEY`, plus `ADMIN_EMAIL`, `MAIL_FROM_EMAIL`, `MAIL_FROM_NAME`.
+
+### Authentication Mechanism
+
+Current: `firebase/php-jwt` generates an HS512 JWT, stored as an HttpOnly cookie `access_token`. Each protected endpoint calls `authenticate()` which decodes the JWT and returns `$decoded->user_id`. If decoding fails (expired, tampered, or missing), `authenticate()` echoes `{ message: 'You have not been authenticated', exception: ... }` and `exit`s — note it does **not** set a 401 status code, it returns HTTP 200 with an error body. The new stack should return a proper 401/redirect to `/login` (a deliberate, correct improvement over the legacy 200-with-error-body behavior).
+
+The login cookie is set with `setcookie(..., httponly: true)` and `secure` driven by `COOKIE_SECURE`; the JWT payload carries `iat`, `iss` (server name), `nbf`, `exp` (issued-at + 60 min), and `user_id`.
+
+#### Session lifetime (parity)
+
+This is the one place legacy behavior is genuinely ambiguous and a decision is required. The JWT's `exp` claim is **60 minutes** (`$issuedAt->modify('+60 minutes')`), but the `access_token` cookie's `Max-Age` is **7 days** (`time() + (86400 * 7)`). Because `JWT::decode()` enforces `exp`, the practical session length is **60 minutes** — after that the still-present cookie holds an expired token and `authenticate()` fails. The 7-day cookie is effectively dead weight.
+
+For the new stack, set Auth.js `session.maxAge` explicitly rather than inheriting the 30-day default. Recommended: `maxAge: 60 * 60` (1 hour) to match the *effective* legacy behavior, with `updateAge` to slide the window on activity. This is surfaced as a decision in [Open Questions](#open-questions--decisions-for-you-to-make).
+
+```ts
+// lib/auth.ts
+session: {
+  strategy: "jwt",
+  maxAge: 60 * 60,        // 1 hour — matches legacy effective session
+  updateAge: 15 * 60,     // refresh token if older than 15 min on activity
+},
+```
+
+New: **Auth.js v5 (NextAuth)** with the `credentials` provider replicates this pattern. Auth.js stores session data in an encrypted, HttpOnly cookie (`next-auth.session-token`). The `user_id` is encoded in the session via the `jwt` callback:
+
+```ts
+// lib/auth.ts (jwt callback)
+callbacks: {
+  jwt({ token, user }) {
+    if (user) token.userId = user.id;
+    return token;
+  },
+  session({ session, token }) {
+    session.user.id = token.userId as string;
+    return session;
+  }
+}
+```
+
+---
+
+## Target Architecture
+
+### Project Structure
+
+```
+game-planning/
+├── app/
+│   ├── (auth)/
+│   │   ├── login/
+│   │   │   └── page.tsx               # Login form page
+│   │   └── sign-up/
+│   │       └── page.tsx               # Sign-up form page
+│   ├── (app)/
+│   │   └── games/
+│   │       ├── page.tsx               # Browse games (games/read)
+│   │       ├── new/
+│   │       │   └── page.tsx           # Create game form
+│   │       └── [id]/
+│   │           ├── page.tsx           # Game detail / read
+│   │           ├── edit/
+│   │           │   └── page.tsx       # Edit game form
+│   │           └── delete/
+│   │               └── page.tsx       # Delete confirmation
+│   ├── api/
+│   │   └── auth/
+│   │       └── [...nextauth]/
+│   │           └── route.ts           # Auth.js catch-all handler
+│   ├── layout.tsx                     # Root layout (font, providers)
+│   └── page.tsx                       # Root → redirect to /games or /login
+├── lib/
+│   ├── auth.ts                        # Auth.js config (credentials provider)
+│   ├── db.ts                          # Prisma client singleton
+│   ├── email.ts                       # Resend email helper
+│   └── validations/
+│       ├── user.ts                    # Zod schemas: signUpSchema, loginSchema
+│       └── game.ts                    # Zod schemas: gameCreateSchema, gameUpdateSchema
+├── components/
+│   ├── ui/                            # shadcn/ui components (auto-generated)
+│   ├── forms/
+│   │   ├── LoginForm.tsx
+│   │   ├── SignUpForm.tsx
+│   │   ├── GameForm.tsx               # Shared create/edit form
+│   │   └── DeleteGameForm.tsx
+│   └── layout/
+│       ├── Nav.tsx
+│       └── Footer.tsx
+├── actions/
+│   ├── auth.ts                        # Server actions: signUp, login, logout
+│   └── games.ts                       # Server actions: createGame, updateGame, deleteGame
+├── prisma/
+│   └── schema.prisma
+├── .env                               # Local secrets (gitignored)
+├── .env-template                      # Committed template
+├── next.config.ts
+├── tailwind.config.ts
+├── tsconfig.json                      # strict: true
+└── package.json
+```
+
+### Prisma Schema
+
+```prisma
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  hashedPassword String
+  userGroup      Int      @default(1)   // 1 = standard, 2 = admin (mirrors user_group)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  games          Game[]
+}
+
+model Game {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  userId      String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("games")  // rename from games_test on fresh Postgres migration
+}
+```
+
+> **MySQL option:** If you prefer to keep MySQL, change `provider = "postgresql"` to `provider = "mysql"` and `DATABASE_URL` accordingly. The schema above is compatible with both. Flag: MySQL lacks some Postgres features (e.g., native arrays, JSONB) but nothing in v1 requires them.
+
+### .env Template
+
+```
+# Database
+DATABASE_URL="postgresql://user:password@host:5432/game_planning"
+
+# Auth.js
+NEXTAUTH_URL="http://localhost:3000"
+NEXTAUTH_SECRET=""
+
+# Email (Resend)
+RESEND_API_KEY=""
+ADMIN_EMAIL=""
+MAIL_FROM_EMAIL="gameplan@yourdomain.com"
+MAIL_FROM_NAME="GamePlan"
+```
+
+---
+
+## Zod Validation Schemas
+
+These replace `validation_functions.php` with typed, composable schemas. Inferred TypeScript types are shared across client components (React Hook Form) and server actions.
+
+```ts
+// lib/validations/user.ts
+import { z } from "zod";
+
+export const signUpSchema = z.object({
+  email: z.string().email("Please provide a valid email address"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+});
+
+export const loginSchema = z.object({
+  email: z.string().email("Submit a valid email to log in"),
+  password: z.string().min(1, "Submit credentials to log in"),
+});
+
+export type SignUpInput = z.infer<typeof signUpSchema>;
+export type LoginInput = z.infer<typeof loginSchema>;
+```
+
+```ts
+// lib/validations/game.ts
+import { z } from "zod";
+
+export const gameCreateSchema = z.object({
+  title: z.string().min(1, "Title cannot be blank."),
+  description: z.string().optional(),
+});
+
+export const gameUpdateSchema = gameCreateSchema.partial().required({ title: true });
+
+export type GameCreateInput = z.infer<typeof gameCreateSchema>;
+export type GameUpdateInput = z.infer<typeof gameUpdateSchema>;
+```
+
+---
+
+## Server Actions
+
+Server Actions replace the PHP REST endpoints. They run on the server, receive validated form data, and return typed results. No separate API route layer is needed for CRUD.
+
+```ts
+// actions/games.ts (excerpt)
+"use server";
+
+import { auth } from "@/lib/auth";
+import { db } from "@/lib/db";
+import { gameCreateSchema } from "@/lib/validations/game";
+import { revalidatePath } from "next/cache";
+
+export async function createGame(formData: FormData) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthenticated");
+
+  const parsed = gameCreateSchema.safeParse({
+    title: formData.get("title"),
+    description: formData.get("description"),
+  });
+  if (!parsed.success) return { error: parsed.error.flatten().fieldErrors };
+
+  const game = await db.game.create({
+    data: { ...parsed.data, userId: session.user.id },
+  });
+
+  revalidatePath("/games");
+  return { data: game };
+}
+```
+
+The pattern for `updateGame(id, formData)` and `deleteGame(id)` follows the same structure: auth check → ownership check (`game.userId !== session.user.id` → 403) → Prisma mutation → `revalidatePath`.
+
+The `signUp` action carries the only parity subtlety not expressible in Zod alone — the duplicate-email case (legacy 409). Zod validates shape; the unique constraint is enforced by the database, so catch Prisma's `P2002`:
+
+```ts
+// actions/auth.ts (excerpt)
+"use server";
+
+import { Prisma } from "@prisma/client";
+import bcrypt from "bcryptjs";
+import { db } from "@/lib/db";
+import { signUpSchema } from "@/lib/validations/user";
+import { notifyAdminNewUser } from "@/lib/email";
+import { headers } from "next/headers";
+
+export async function signUp(formData: FormData) {
+  const parsed = signUpSchema.safeParse({
+    email: formData.get("email"),
+    password: formData.get("password"),
+  });
+  if (!parsed.success) return { error: parsed.error.flatten().fieldErrors };
+
+  try {
+    const hashedPassword = await bcrypt.hash(parsed.data.password, 10);
+    const user = await db.user.create({
+      data: { email: parsed.data.email, hashedPassword }, // userGroup defaults to 1
+    });
+    const ua = (await headers()).get("user-agent") ?? "unknown";
+    await notifyAdminNewUser(user.email, ua);
+    return { data: { message: "Account creation succeeded" } };
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      // mirrors legacy 409
+      return { error: { email: ["This email address is already associated with an account"] } };
+    }
+    throw e;
+  }
+}
+```
+
+---
+
+## Auth.js Configuration
+
+```ts
+// lib/auth.ts
+import NextAuth from "next-auth";
+import Credentials from "next-auth/providers/credentials";
+import { db } from "@/lib/db";
+import { loginSchema } from "@/lib/validations/user";
+import bcrypt from "bcryptjs";
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  session: {
+    strategy: "jwt",
+    maxAge: 60 * 60,        // 1 hour — matches legacy effective session (JWT exp)
+    updateAge: 15 * 60,
+  },
+  providers: [
+    Credentials({
+      async authorize(credentials) {
+        const parsed = loginSchema.safeParse(credentials);
+        if (!parsed.success) return null;
+
+        const user = await db.user.findUnique({
+          where: { email: parsed.data.email },
+        });
+        if (!user) return null;
+
+        const valid = await bcrypt.compare(parsed.data.password, user.hashedPassword);
+        if (!valid) return null;
+
+        return { id: user.id, email: user.email };
+      },
+    }),
+  ],
+  callbacks: {
+    jwt({ token, user }) {
+      if (user) token.userId = user.id;
+      return token;
+    },
+    session({ session, token }) {
+      if (token.userId) session.user.id = token.userId as string;
+      return session;
+    },
+  },
+  pages: {
+    signIn: "/login",
+  },
+});
+```
+
+---
+
+## Email Notification
+
+```ts
+// lib/email.ts
+import { Resend } from "resend";
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+export async function notifyAdminNewUser(email: string, userAgent: string) {
+  const adminEmail = process.env.ADMIN_EMAIL;
+  if (!adminEmail || !process.env.RESEND_API_KEY) return;
+
+  await resend.emails.send({
+    from: `${process.env.MAIL_FROM_NAME} <${process.env.MAIL_FROM_EMAIL}>`,
+    to: adminEmail,
+    subject: "GamePlan — New Account Created",
+    text: [
+      "A new account was created on GamePlan.",
+      `Email: ${email}`,
+      `Date: ${new Date().toISOString()}`,
+      `Device: ${userAgent.slice(0, 1024)}`,
+    ].join("\n\n"),
+  });
+}
+```
+
+Called inside the `signUp` server action after `db.user.create()` succeeds — directly mirrors `notify_admin_new_user()` in the PHP.
+
+---
+
+## Behavior Parity: Status Codes & Error Messages
+
+Because v1's contract is "all existing functionality preserved exactly," the server actions must reproduce the legacy endpoints' **exact status codes and user-facing messages** (these strings are consumed by the current UI's `handleErrors.js` and shown to users). The table below is transcribed verbatim from the PHP handlers and is the acceptance checklist for Milestone 6 parity testing.
+
+### `signUp` (was `POST /sign-up`)
+
+| Condition | Legacy status | Message |
+|---|---|---|
+| Missing email | 400 | `Submit an email address to register` |
+| Password empty or `< 8` chars | 400 | `Password must be at least 8 characters` |
+| Invalid email format | 400 | `Please provide a valid email address` |
+| Email already registered | 409 | `This email address is already associated with an account` |
+| Success | 201 | `Account creation succeeded` (also fires admin email) |
+
+> Validation order matters: email-presence → password-length → email-format → uniqueness. The duplicate-email case (409) must be handled by catching Prisma's `P2002` unique-constraint error on `email` — the Zod schema alone cannot detect it. The current plan's `signUpSchema` omits this message; add it to the `signUp` action's error mapping.
+
+### `login` (was `POST /login`)
+
+| Condition | Legacy status | Message |
+|---|---|---|
+| Missing email or password | 400 | `Submit credentials to log in` |
+| Credentials invalid | 401 | `Log in failed` |
+| Success | 200 | `Log in succeeded` (+ `logged_in: 'true'`) |
+
+> Legacy `/login` does **not** validate email *format* — only presence. The plan's `loginSchema` email message (`"Submit a valid email to log in"`) introduces format validation that did not exist; for strict parity, relax it to a presence check (`z.string().min(1, "Submit credentials to log in")`) or accept the minor, defensible tightening and note it.
+
+### `logout` (was `POST /logout`)
+
+| Condition | Legacy status | Message |
+|---|---|---|
+| Always | 200 | `Logged out` (expires `access_token` cookie) |
+
+### Game endpoints (all require auth)
+
+| Action | Condition | Legacy status | Message |
+|---|---|---|---|
+| `readGame` | Missing id | 400 | `Please provide a game's id` |
+| `readGame` | No such game | 404 | `No game is associated with the provided id` |
+| `readGame` | Not owner | 403 | `You do not have permission to view this game` |
+| `createGame` | Title blank | (200 body w/ errors) | `Title cannot be blank.` |
+| `createGame` | No `game` payload | 200 | `Please provide an array of game form data` |
+| `createGame` | Success | 200 | `Game created` |
+| `updateGame` | Missing id | 400 | `Please provide a game id` |
+| `updateGame` | No such game | 404 | `id <id> does not match a game in the database` |
+| `updateGame` | Not owner | 403 | `You do not have permission to update this game` |
+| `updateGame` | Save failed | 422 | `Game not updated` |
+| `updateGame` | Success | 200 | `<title> updated` |
+| `deleteGame` | Missing id | 400 | `Please provide a game's id` |
+| `deleteGame` | No such game | 404 | `No game is associated with the provided id` |
+| `deleteGame` | Not owner | 403 | `You do not have permission to delete this game` |
+| `deleteGame` | Delete failed | 500 | `Game not deleted` |
+| `deleteGame` | Success | 200 | `Game deleted` |
+
+> **Ownership checks use `!=` (loose) in PHP** on integer `user_id`. With cuid string IDs in Prisma, use strict `!==`. The only validation `Game::validate()` enforces is the non-blank title — `description` is fully optional, matching `gameCreateSchema`.
+
+> **Payload shape change (non-user-facing):** legacy `create`/`update` read a nested `$_POST['game']` array (`game[title]`, `game[description]`), i.e. form-encoded with a `game` namespace. The new server actions take a flat `FormData` (`title`, `description`). This is a wire-format change only; no user-visible behavior differs. Worth noting so anyone diffing network traffic during parity testing isn't surprised.
+
+---
+
+## UI Component Mapping
+
+| PHP/Vanilla-JS | Next.js Equivalent |
+|---|---|
+| `login.html` + `modules/requests/login.js` | `app/(auth)/login/page.tsx` + `LoginForm.tsx` (RHF + Zod) |
+| `sign-up.html` + `modules/requests/sign-up.js` | `app/(auth)/sign-up/page.tsx` + `SignUpForm.tsx` |
+| `games/read.html` | `app/(app)/games/page.tsx` (Server Component, fetches via Prisma) |
+| `game/create.html` | `app/(app)/games/new/page.tsx` + `GameForm.tsx` |
+| `game/edit.html` | `app/(app)/games/[id]/edit/page.tsx` + `GameForm.tsx` |
+| `game/delete.html` | `app/(app)/games/[id]/delete/page.tsx` + `DeleteGameForm.tsx` |
+| `modules/components/nav.js` | `components/layout/Nav.tsx` |
+| `modules/components/footer.js` | `components/layout/Footer.tsx` |
+| `modules/exports/handleErrors.js` | Inline form error states via RHF `formState.errors` |
+| `modules/exports/cookieMethods.js` | Removed — Auth.js manages session cookies |
+| `modules/exports/apiHostname.js` | Removed — server actions are co-located |
+
+---
+
+## End-to-End Type Safety (The Point of the Migration)
+
+The migration's key architectural value is that types flow unbroken from database to browser. No manual type casting or `any` escapes:
+
+```
+prisma/schema.prisma
+        ↓ (prisma generate)
+@prisma/client → Game, User types
+        ↓
+lib/validations/game.ts → GameCreateInput = z.infer<typeof gameCreateSchema>
+        ↓
+actions/games.ts → receives GameCreateInput, returns Prisma.Game
+        ↓
+app/(app)/games/page.tsx → Server Component receives Prisma.Game[]
+        ↓
+components/forms/GameForm.tsx → useForm<GameCreateInput>() typed by Zod schema
+```
+
+Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` — use `unknown` and narrow explicitly.
+
+---
+
+## Migration Sequence (Milestones)
+
+### Milestone 1 — Scaffold
+- `npx create-next-app@latest game-planning --typescript --tailwind --eslint --app --src-dir no --import-alias "@/*"`
+- Install shadcn/ui: `npx shadcn@latest init`
+- Install dependencies: `prisma`, `@prisma/client`, `next-auth@beta`, `zod`, `react-hook-form`, `@hookform/resolvers`, `bcryptjs`, `resend`
+- Configure `tsconfig.json`: `"strict": true`
+- Verify: `npm run dev` serves `localhost:3000`
+
+### Milestone 2 — Database
+- Write `prisma/schema.prisma` exactly as specified above
+- `npx prisma migrate dev --name init`
+- Write `prisma/seed.ts` with one test user (bcrypt password) and two games
+- `npx prisma db seed`
+- Verify: `npx prisma studio` shows seeded data
+
+### Milestone 3 — Authentication
+- Implement `lib/auth.ts` (credentials provider)
+- Implement `app/api/auth/[...nextauth]/route.ts`
+- Implement `actions/auth.ts`: `signUp` (with Resend notify), `login` (calls `signIn`), `logout` (calls `signOut`)
+- Build `app/(auth)/login/page.tsx` and `sign-up/page.tsx` with `LoginForm` and `SignUpForm`
+- Verify: sign up creates user in DB, admin email fires; login sets session; logout clears it
+
+### Milestone 4 — Game CRUD (API Layer)
+- Implement all four server actions in `actions/games.ts`
+- Add ownership checks matching PHP: `game.userId !== session.user.id` → return 403-equivalent error
+- Verify with `curl` / Postman against the server action endpoints or direct DB checks
+
+### Milestone 5 — UI Pages
+- Build `app/(app)/games/page.tsx`: server component calling `db.game.findMany({ where: { userId } })`
+- Build `GameForm.tsx`: `useForm<GameCreateInput>()` with `zodResolver(gameCreateSchema)`, `title` required field, optional `description` textarea
+- Build all game pages (new, [id], edit, delete) using shadcn/ui `Card`, `Button`, `Input`, `Textarea`, `Label`
+- Verify: all CRUD operations work end-to-end in browser; matches behavior of live app at `gameplan.stephens.page`
+
+### Milestone 6 — Parity Check & Deploy
+- Side-by-side verification against `gameplan.stephens.page` and `api.gameplan.stephens.page`
+- Deploy to Vercel: `vercel --prod`
+- Provision managed Postgres (Vercel Postgres, Neon, or Supabase)
+- Set all env vars in Vercel dashboard
+- Run `npx prisma migrate deploy` against production database
+- Smoke test production
+
+---
+
+## Open Questions / Decisions for You to Make
+
+1. **PostgreSQL or MySQL?** The plan defaults to PostgreSQL (recommended for Vercel/Neon). Prisma supports MySQL equally; change one line in `schema.prisma`. If you have an existing MySQL database to migrate data from, MySQL keeps data migration simpler.
+
+2. **Table name: `games_test` or `games`?** On a fresh Postgres database, `games` is cleaner. If migrating live data from the existing MySQL, use `@@map("games_test")` to preserve the name.
+
+3. **`user_group` → role mapping.** Currently `user_group = 1` for all new users. The admin tier is not surfaced in the UI. For v1, preserve as `userGroup: Int @default(1)` in Prisma. An admin UI or role-based guards can be added post-v1.
+
+4. **Password migration.** Existing bcrypt hashes (`PASSWORD_BCRYPT`) are directly compatible with `bcryptjs.compare()` in Node.js. No re-hashing needed for migrated users.
+
+5. **Resend or Nodemailer?** Resend is recommended (simpler SDK, no SMTP config). Nodemailer + an SMTP provider (e.g., Mailgun, Postmark) is an alternative if you have an existing SMTP setup.
+
+6. **Session lifetime.** The legacy effective session is ~60 minutes (JWT `exp`), despite a 7-day cookie (see [Session Lifetime](#session-lifetime-parity)). Decide whether to match it exactly (`maxAge: 60 * 60`, recommended for parity), or take the migration as an opportunity to extend sessions to a more conventional length (e.g., 7 or 30 days). The 7-day cookie suggests a 7-day session may have been the *original intent* — confirm which behavior you actually want before locking in `maxAge`.
+
+7. **Error-message parity vs. cleanup.** The [Behavior Parity table](#behavior-parity-status-codes--error-messages) preserves legacy strings verbatim. Two legacy quirks are flagged for a yes/no: (a) `/login` validates email *presence* only, not format — keep loose or tighten? (b) `authenticate()` returns HTTP 200 with an error body instead of 401 — the new stack should return a real 401/redirect (recommended). Confirm you want these two corrected rather than reproduced bug-for-bug.
+
+---
+
+## Dependency Reference
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `next` | latest (15.x) | Framework |
+| `react`, `react-dom` | 19.x | UI runtime |
+| `typescript` | 5.x | Language |
+| `prisma` | 6.x | ORM + migrations |
+| `@prisma/client` | 6.x | DB client |
+| `next-auth` | 5.x (beta) | Authentication |
+| `zod` | 3.x | Validation schemas |
+| `react-hook-form` | 7.x | Form state |
+| `@hookform/resolvers` | 3.x | RHF + Zod bridge |
+| `bcryptjs` | 2.x | Password hashing |
+| `@types/bcryptjs` | 2.x | TS types |
+| `resend` | 4.x | Transactional email |
+| `tailwindcss` | 4.x | Styling |
+| `shadcn/ui` | latest | Component library |
+
