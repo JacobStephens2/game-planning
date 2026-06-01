@@ -596,7 +596,9 @@ Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` �
 - **Gotcha:** this shadcn build uses **Base UI** `Button` (not Radix) — no `asChild`/Slot. Link-buttons use `buttonVariants()` on `<Link>` instead.
 - **Verified end-to-end (headless Chrome via playwright-core + system google-chrome):** login → **client-side** blank-title validation (`"Title cannot be blank."`) → create (appears in list) → edit (persists on detail) → delete (gone). DB returns to seed state. *(Test-harness note: the `(app)` Nav's `type="submit"` logout button precedes the form button in the DOM — target form submits by text, not a bare `button[type=submit]`.)*
 
-### Milestone 6 — Parity Check & Deploy 🟡 (in progress 2026-06-01)
+### Milestone 6 — Parity Check & Deploy ✅ (done 2026-06-01)
+**Live at `https://gameplan.stephens.page`** — cut over in place (legacy PHP app replaced; old vhosts saved as `*.legacy-bak` for rollback). Verified end-to-end in a real browser against the public HTTPS URL: login → list (SSR + DB through the proxy) → create (server action) → delete. Two prod-only requirements were needed: pin `AUTH_URL` to the public origin, and have the `:443` vhost send `X-Forwarded-Proto: https` (so Auth.js issues `__Secure-` cookies and correct URLs). Deploy is `deploy/deploy.sh` (build-is-deploy → restart `gameplan-web`).
+
 **Decision: self-host on the VPS** (not Vercel) — the DB already lives here and the systemd + Apache reverse-proxy + certbot pattern is already in use for channel0 / the dashboard. Deployed **parallel** to the legacy PHP app; cut over later.
 
 Done:
