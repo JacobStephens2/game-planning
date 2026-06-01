@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { buttonVariants } from "@/components/ui/button";
+import { PackingList } from "@/components/PackingList";
 import { formatEventDate } from "@/lib/format";
 
 export default async function EventDetailPage({
@@ -16,7 +17,7 @@ export default async function EventDetailPage({
 
   const event = await db.event.findUnique({
     where: { id },
-    include: { games: { orderBy: { title: "asc" } } },
+    include: { games: { include: { game: true }, orderBy: { game: { title: "asc" } } } },
   });
   if (!event) notFound();
   if (event.userId !== session.user.id) {
@@ -51,20 +52,31 @@ export default async function EventDetailPage({
       {event.notes && <p className="whitespace-pre-wrap text-muted-foreground">{event.notes}</p>}
 
       <div className="space-y-2">
-        <h2 className="text-sm font-medium">Games to bring</h2>
-        {event.games.length === 0 ? (
-          <p className="text-muted-foreground">No games selected for this event yet.</p>
-        ) : (
-          <ul className="list-inside list-disc space-y-1">
-            {event.games.map((game) => (
-              <li key={game.id}>
-                <Link href={`/games/${game.id}`} className="underline underline-offset-4">
-                  {game.title}
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
+        {(() => {
+          const items = event.games.map((eg) => ({
+            gameId: eg.gameId,
+            title: eg.game.title,
+            packed: eg.packed,
+          }));
+          const packedCount = items.filter((i) => i.packed).length;
+          return (
+            <>
+              <div className="flex items-baseline justify-between">
+                <h2 className="text-sm font-medium">Packing list</h2>
+                {items.length > 0 && (
+                  <span className="text-sm text-muted-foreground">
+                    {packedCount} of {items.length} packed
+                  </span>
+                )}
+              </div>
+              {items.length === 0 ? (
+                <p className="text-muted-foreground">No games selected for this event yet.</p>
+              ) : (
+                <PackingList eventId={event.id} items={items} />
+              )}
+            </>
+          );
+        })()}
       </div>
 
       <Link href="/events" className={buttonVariants({ variant: "link", className: "px-0" })}>

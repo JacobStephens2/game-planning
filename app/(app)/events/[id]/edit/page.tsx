@@ -15,7 +15,7 @@ export default async function EditEventPage({
 
   const event = await db.event.findUnique({
     where: { id },
-    include: { games: { select: { id: true } } },
+    include: { games: { select: { gameId: true } } },
   });
   if (!event) notFound();
   if (event.userId !== session.user.id) {
@@ -39,7 +39,7 @@ export default async function EditEventPage({
           name: event.name,
           eventDate: toDateInputValue(event.eventDate),
           notes: event.notes,
-          gameIds: event.games.map((g) => g.id),
+          gameIds: event.games.map((g) => g.gameId),
         }}
       />
     </div>
