@@ -1,0 +1,21 @@
+[Unit]
+Description=GamePlan (Next.js standalone) web app
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=jacob
+Group=jacob
+# The Next standalone server runs from its own output directory.
+WorkingDirectory=/var/www/game-planning/.next/standalone
+EnvironmentFile=/var/www/game-planning/.env
+Environment=NODE_ENV=production
+Environment=PORT=3473
+Environment=HOSTNAME=127.0.0.1
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

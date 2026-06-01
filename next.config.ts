@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Self-host deploy: emit a minimal standalone server (.next/standalone)
+  // to run behind Apache reverse-proxy via systemd.
+  output: "standalone",
 };
 
 export default nextConfig;
