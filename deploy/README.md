@@ -6,9 +6,14 @@ systemd, reverse-proxied by Apache, with TLS from certbot.
 **Live at `https://gameplan.stephens.page`** (cut over 2026-06-01 — the legacy PHP
 app was replaced in place). The previous vhosts are backed up at
 `/etc/apache2/sites-available/gameplan.stephens.page*.conf.legacy-bak`; restore
-those + `systemctl reload apache2` to roll back. The legacy app dir
-(`/var/www/gameplan.stephens.page`) and the unused `api.gameplan.stephens.page`
-vhost are still present but no longer served — retire when ready.
+those + `systemctl reload apache2` to roll back.
+
+Legacy retired 2026-06-01: the `api.gameplan.stephens.page` vhosts were
+`a2dissite`d (conf files remain in sites-available, reversible), and the old app
+dir `/var/www/gameplan.stephens.page` was archived to
+`/mnt/volume_nyc3_01/jacob/retired/gameplan.stephens.page-legacy-20260601.tar.gz`
+(includes the gitignored legacy secrets) and removed. Source also lives in the
+GitHub repos `game-planning-web-app-ui` and `game-planning-api`.
 
 ### Reverse-proxy requirements (learned in prod)
 - The `:443` vhost must send **`RequestHeader set X-Forwarded-Proto "https"`** and
