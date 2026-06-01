@@ -178,16 +178,20 @@ game-planning/
 
 ### Prisma Schema
 
+> **As built (Prisma 7).** The original draft of this block targeted Prisma 6 (`prisma-client-js` generator, `url` inside the datasource). Prisma 7 changed both: the generator is now `prisma-client` with a required `output`, and **`url` is no longer allowed in the schema** — the CLI reads it from `prisma.config.ts` and the runtime client connects via a **driver adapter** (`@prisma/adapter-pg`). The block below is what is actually committed.
+
 ```prisma
 // prisma/schema.prisma
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // No `url` here in Prisma 7. Migrate reads it from prisma.config.ts;
+  // the runtime client uses a driver adapter (see lib/db.ts).
 }
 
 model User {
@@ -198,6 +202,8 @@ model User {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   games          Game[]
+
+  @@map("users")
 }
 
 model Game {
@@ -209,21 +215,48 @@ model Game {
   updatedAt   DateTime @updatedAt
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@map("games")  // rename from games_test on fresh Postgres migration
+  @@map("games")  // chose `games` over legacy `games_test` (Open Question #2)
 }
 ```
 
-> **MySQL option:** If you prefer to keep MySQL, change `provider = "postgresql"` to `provider = "mysql"` and `DATABASE_URL` accordingly. The schema above is compatible with both. Flag: MySQL lacks some Postgres features (e.g., native arrays, JSONB) but nothing in v1 requires them.
+Supporting Prisma 7 files (also committed):
+
+```ts
+// prisma.config.ts — CLI-time config (Migrate URL + seed runner)
+import "dotenv/config";
+import { defineConfig } from "prisma/config";
+
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: { path: "prisma/migrations", seed: "tsx prisma/seed.ts" },
+  datasource: { url: process.env["DATABASE_URL"] },
+});
+```
+
+```ts
+// lib/db.ts — runtime client via the pg driver adapter
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "@/lib/generated/prisma/client";
+
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+export const db = globalForPrisma.prisma ?? new PrismaClient({ adapter });
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = db;
+```
+
+> **MySQL option:** If you prefer MySQL, change `provider = "postgresql"` and swap the adapter to `@prisma/adapter-mariadb` (or another supported driver) in `lib/db.ts`. We chose PostgreSQL (Open Question #1). MySQL lacks some Postgres features (native arrays, JSONB) but nothing in v1 requires them.
 
 ### .env Template
 
-```
-# Database
-DATABASE_URL="postgresql://user:password@host:5432/game_planning"
+As committed in `.env-template` (Auth.js **v5** uses `AUTH_SECRET`/`AUTH_URL`, not the v4 `NEXTAUTH_*` names):
 
-# Auth.js
-NEXTAUTH_URL="http://localhost:3000"
-NEXTAUTH_SECRET=""
+```
+# Database (Postgres) — used by prisma.config.ts (Migrate) and lib/db.ts adapter
+DATABASE_URL="postgresql://user:password@localhost:5432/game_planning?schema=public"
+
+# Auth.js v5 — generate with: npx auth secret
+AUTH_SECRET=""
+# AUTH_URL="http://localhost:3000"   # optional in dev; set to deployed origin in prod
 
 # Email (Resend)
 RESEND_API_KEY=""
@@ -537,12 +570,13 @@ Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` �
 - `tsconfig.json` `"strict": true` confirmed (create-next-app default); import alias `@/*` confirmed; `app/` at repo root (no `src/`).
 - **Verified:** `npm run build` compiles cleanly on Next 16.2.6 (`✓ Compiled successfully`).
 
-### Milestone 2 — Database
-- Write `prisma/schema.prisma` exactly as specified above
-- `npx prisma migrate dev --name init`
-- Write `prisma/seed.ts` with one test user (bcrypt password) and two games
-- `npx prisma db seed`
-- Verify: `npx prisma studio` shows seeded data
+### Milestone 2 — Database ✅ (done 2026-06-01)
+- **Decisions taken:** PostgreSQL (Q1), table name `games` (Q2).
+- Postgres role+db created on the existing on-volume Postgres 16 cluster: role `gameplan` (needs `CREATEDB` so `migrate dev` can build its shadow database), db `game_planning`. `DATABASE_URL` written to gitignored `.env`; `.env-template` committed.
+- `prisma/schema.prisma` written (Prisma 7 form above) → `npx prisma migrate dev --name init` created `users` + `games` with the unique-email index and cascade FK.
+- `prisma/seed.ts` (one bcrypt user `test@example.com` / `password123`, two games) wired via `migrations.seed` in `prisma.config.ts`; run with `npx prisma db seed`.
+- **Verified:** seeded rows confirmed via `psql`; `npx tsc --noEmit` clean; `npm run build` green with the Prisma client + adapter present. (Skipped `prisma studio` — it's an interactive GUI; SQL check was sufficient.)
+- **Prisma 7 gotchas hit & resolved:** (a) no `url` in schema → use driver adapter `@prisma/adapter-pg`; (b) `new PrismaClient()` needs `{ adapter }`; (c) seed runner is `tsx`, configured in `prisma.config.ts` (not `package.json#prisma`); (d) shadow DB needs role `CREATEDB`.
 
 ### Milestone 3 — Authentication
 - Implement `lib/auth.ts` (credentials provider)
