@@ -63,7 +63,7 @@ export async function createEvent(formData: FormData): Promise<EventFormState> {
       eventDate: parseDate(parsed.data.eventDate),
       notes: parsed.data.notes ?? null,
       userId,
-      games: { connect: gameIds.map((id) => ({ id })) },
+      games: { create: gameIds.map((gid) => ({ gameId: gid })) }, // packed defaults false
     },
   });
 
@@ -92,13 +92,54 @@ export async function updateEvent(id: string, formData: FormData): Promise<Event
       name: parsed.data.name,
       eventDate: parseDate(parsed.data.eventDate),
       notes: parsed.data.notes ?? null,
-      games: { set: gameIds.map((gid) => ({ id: gid })) }, // replace the selection
     },
   });
+
+  // Reconcile which games are on the plan, preserving `packed` for ones that
+  // stay: drop de-selected rows, add newly-selected ones.
+  await db.eventGame.deleteMany({ where: { eventId: id, gameId: { notIn: gameIds } } });
+  if (gameIds.length > 0) {
+    const existing = await db.eventGame.findMany({
+      where: { eventId: id },
+      select: { gameId: true },
+    });
+    const have = new Set(existing.map((e) => e.gameId));
+    const toAdd = gameIds.filter((gid) => !have.has(gid));
+    if (toAdd.length > 0) {
+      await db.eventGame.createMany({
+        data: toAdd.map((gid) => ({ eventId: id, gameId: gid })),
+      });
+    }
+  }
 
   revalidatePath("/events");
   revalidatePath(`/events/${id}`);
   redirect(`/events/${id}`);
+}
+
+// Toggle a game's packed state on an event (the packing list). Owner-scoped.
+export async function setPacked(
+  eventId: string,
+  gameId: string,
+  packed: boolean,
+): Promise<{ error?: string }> {
+  const userId = await requireUserId();
+
+  const event = await db.event.findUnique({
+    where: { id: eventId },
+    select: { userId: true },
+  });
+  if (!event || event.userId !== userId) {
+    return { error: "You do not have permission to update this event" };
+  }
+
+  await db.eventGame.update({
+    where: { eventId_gameId: { eventId, gameId } },
+    data: { packed },
+  });
+
+  revalidatePath(`/events/${eventId}`);
+  return {};
 }
 
 export async function deleteEvent(id: string): Promise<EventFormState> {
