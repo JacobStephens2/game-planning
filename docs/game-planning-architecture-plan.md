@@ -596,13 +596,20 @@ Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` �
 - **Gotcha:** this shadcn build uses **Base UI** `Button` (not Radix) — no `asChild`/Slot. Link-buttons use `buttonVariants()` on `<Link>` instead.
 - **Verified end-to-end (headless Chrome via playwright-core + system google-chrome):** login → **client-side** blank-title validation (`"Title cannot be blank."`) → create (appears in list) → edit (persists on detail) → delete (gone). DB returns to seed state. *(Test-harness note: the `(app)` Nav's `type="submit"` logout button precedes the form button in the DOM — target form submits by text, not a bare `button[type=submit]`.)*
 
-### Milestone 6 — Parity Check & Deploy
-- Side-by-side verification against `gameplan.stephens.page` and `api.gameplan.stephens.page`
-- Deploy to Vercel: `vercel --prod`
-- Provision managed Postgres (Vercel Postgres, Neon, or Supabase)
-- Set all env vars in Vercel dashboard
-- Run `npx prisma migrate deploy` against production database
-- Smoke test production
+### Milestone 6 — Parity Check & Deploy 🟡 (in progress 2026-06-01)
+**Decision: self-host on the VPS** (not Vercel) — the DB already lives here and the systemd + Apache reverse-proxy + certbot pattern is already in use for channel0 / the dashboard. Deployed **parallel** to the legacy PHP app; cut over later.
+
+Done:
+- **Parity checked vs the live PHP API**: `POST /login` empty → `400 "Submit credentials to log in"` ✓; `POST /sign-up` bad email → `400 "Please provide a valid email address"` ✓ — exact match to our Zod messages. Unauth `games/read` returns **HTTP 500 with an empty body** on the live app (a PHP fatal on the missing cookie) — confirms the Q7 decision to replace that broken path with a real redirect/401 rather than reproduce it.
+- `next.config.ts` → `output: "standalone"`; production build smoke-tested.
+- `deploy/`: systemd unit, Apache vhost template, build-is-deploy script, runbook.
+- **systemd service `gameplan-web` live on `127.0.0.1:3473`** (enabled on boot, ~49 MB): serves pages, authenticates against the DB (7-day session), reads seeded games. Verified.
+
+Remaining (needs DNS — outward-facing):
+- Choose subdomain (e.g. `gameplan2.stephens.page`) + add A record → `68.183.62.24`.
+- `a2enmod proxy proxy_http`; install the vhost; `certbot --apache` for TLS.
+- Optionally set `RESEND_API_KEY` to enable the admin sign-up email in prod.
+- Cutover: repoint `gameplan.stephens.page` and retire the PHP vhosts (migrate legacy MySQL rows first if they must be preserved).
 
 ---
 
