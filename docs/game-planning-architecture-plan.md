@@ -587,16 +587,14 @@ Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` �
 - **Verified at runtime (dev server + NextAuth REST flow):** seeded user logs in → 302 to `/games`, `/api/auth/session` returns `user.id` with a 7-day `expires`; wrong password → `CredentialsSignin`, session `null`; logout → session `null`. Sign-up data path (bcrypt hash → create → **P2002** duplicate guard, `userGroup` defaults to 1) verified against the DB, and a freshly-created user authenticates through the live flow (proves bcrypt hash compatibility).
 - **Admin email:** not exercised — no `RESEND_API_KEY` set, so `notifyAdminNewUser` no-ops exactly like the legacy guard. Wire a real key in env to enable; the send is also wrapped so a failure never breaks sign-up.
 
-### Milestone 4 — Game CRUD (API Layer)
-- Implement all four server actions in `actions/games.ts`
-- Add ownership checks matching PHP: `game.userId !== session.user.id` → return 403-equivalent error
-- Verify with `curl` / Postman against the server action endpoints or direct DB checks
+### Milestone 4 — Game CRUD (API Layer) ✅ (done 2026-06-01)
+- `actions/games.ts`: `createGame`, `updateGame`, `deleteGame`, each owner-scoped via `auth()` (unauthenticated → `redirect("/login")`). Existence/ownership checks reproduce the legacy **404-vs-403** distinction with the exact PHP messages; mutations `revalidatePath` + `redirect`. (The legacy "missing id" 400 and "no game payload" cases can't occur — ids come from route params and the form always posts.)
+- `lib/validations/game.ts`: Zod 4 schemas, sole rule is non-blank title.
 
-### Milestone 5 — UI Pages
-- Build `app/(app)/games/page.tsx`: server component calling `db.game.findMany({ where: { userId } })`
-- Build `GameForm.tsx`: `useForm<GameCreateInput>()` with `zodResolver(gameCreateSchema)`, `title` required field, optional `description` textarea
-- Build all game pages (new, [id], edit, delete) using shadcn/ui `Card`, `Button`, `Input`, `Textarea`, `Label`
-- Verify: all CRUD operations work end-to-end in browser; matches behavior of live app at `gameplan.stephens.page`
+### Milestone 5 — UI Pages ✅ (done 2026-06-01)
+- `(app)` route group with an auth-guarded layout (`Nav` + `Footer`); games list (server component, `findMany` scoped to user); `new` / `[id]` / `[id]/edit` / `[id]/delete` pages; shared `GameForm` (RHF + `zodResolver`) and `DeleteGameForm`; root `/` redirects by session.
+- **Gotcha:** this shadcn build uses **Base UI** `Button` (not Radix) — no `asChild`/Slot. Link-buttons use `buttonVariants()` on `<Link>` instead.
+- **Verified end-to-end (headless Chrome via playwright-core + system google-chrome):** login → **client-side** blank-title validation (`"Title cannot be blank."`) → create (appears in list) → edit (persists on detail) → delete (gone). DB returns to seed state. *(Test-harness note: the `(app)` Nav's `type="submit"` logout button precedes the form button in the DOM — target form submits by text, not a bare `button[type=submit]`.)*
 
 ### Milestone 6 — Parity Check & Deploy
 - Side-by-side verification against `gameplan.stephens.page` and `api.gameplan.stephens.page`
