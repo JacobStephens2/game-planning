@@ -88,16 +88,17 @@ The login cookie is set with `setcookie(..., httponly: true)` and `secure` drive
 
 This is the one place legacy behavior is genuinely ambiguous and a decision is required. The JWT's `exp` claim is **60 minutes** (`$issuedAt->modify('+60 minutes')`), but the `access_token` cookie's `Max-Age` is **7 days** (`time() + (86400 * 7)`). Because `JWT::decode()` enforces `exp`, the practical session length is **60 minutes** — after that the still-present cookie holds an expired token and `authenticate()` fails. The 7-day cookie is effectively dead weight.
 
-For the new stack, set Auth.js `session.maxAge` explicitly rather than inheriting the 30-day default. Recommended: `maxAge: 60 * 60` (1 hour) to match the *effective* legacy behavior, with `updateAge` to slide the window on activity. This is surfaced as a decision in [Open Questions](#open-questions--decisions-for-you-to-make).
+**Decision taken (M3): extend to 7 days.** The 7-day cookie reflects the apparent original intent, and a 7-day session is a far better UX than the accidental ~60-minute one. Auth.js `session.maxAge` is set explicitly rather than inheriting the 30-day default:
 
 ```ts
-// lib/auth.ts
+// lib/auth.ts (as built)
 session: {
   strategy: "jwt",
-  maxAge: 60 * 60,        // 1 hour — matches legacy effective session
-  updateAge: 15 * 60,     // refresh token if older than 15 min on activity
+  maxAge: 7 * 24 * 60 * 60,   // 7 days
 },
 ```
+
+Verified: a fresh login's `/api/auth/session` returns `expires` exactly 7 days out.
 
 New: **Auth.js v5 (NextAuth)** with the `credentials` provider replicates this pattern. Auth.js stores session data in an encrypted, HttpOnly cookie (`next-auth.session-token`). The `user_id` is encoded in the session via the `jwt` callback:
 
@@ -393,9 +394,9 @@ import bcrypt from "bcryptjs";
 export const { handlers, auth, signIn, signOut } = NextAuth({
   session: {
     strategy: "jwt",
-    maxAge: 60 * 60,        // 1 hour — matches legacy effective session (JWT exp)
-    updateAge: 15 * 60,
+    maxAge: 7 * 24 * 60 * 60,   // 7 days (decision)
   },
+  trustHost: true,              // single self-hosted origin + localhost dev
   providers: [
     Credentials({
       async authorize(credentials) {
@@ -429,6 +430,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   },
 });
 ```
+
+> **Notes from the build:** (1) `session.user.id = token.userId as string` needs the cast — the `next-auth/jwt` augmentation resolves `token.userId` too loosely for a direct assignment. (2) The `login` server action wraps `signIn` in try/catch: a successful sign-in throws `NEXT_REDIRECT` (re-thrown so navigation happens), while `instanceof AuthError` is caught and returned as the legacy `"Log in failed"` message. (3) The route handler is just `export const { GET, POST } = handlers` from `app/api/auth/[...nextauth]/route.ts`. No middleware (route protection is done with `auth()` in server components/actions), which keeps bcrypt + Prisma off the edge runtime.
 
 ---
 
@@ -578,12 +581,11 @@ Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` �
 - **Verified:** seeded rows confirmed via `psql`; `npx tsc --noEmit` clean; `npm run build` green with the Prisma client + adapter present. (Skipped `prisma studio` — it's an interactive GUI; SQL check was sufficient.)
 - **Prisma 7 gotchas hit & resolved:** (a) no `url` in schema → use driver adapter `@prisma/adapter-pg`; (b) `new PrismaClient()` needs `{ adapter }`; (c) seed runner is `tsx`, configured in `prisma.config.ts` (not `package.json#prisma`); (d) shadow DB needs role `CREATEDB`.
 
-### Milestone 3 — Authentication
-- Implement `lib/auth.ts` (credentials provider)
-- Implement `app/api/auth/[...nextauth]/route.ts`
-- Implement `actions/auth.ts`: `signUp` (with Resend notify), `login` (calls `signIn`), `logout` (calls `signOut`)
-- Build `app/(auth)/login/page.tsx` and `sign-up/page.tsx` with `LoginForm` and `SignUpForm`
-- Verify: sign up creates user in DB, admin email fires; login sets session; logout clears it
+### Milestone 3 — Authentication ✅ (done 2026-06-01)
+- **Decisions taken:** 7-day session (Q6); correct both legacy quirks (Q7) — real redirect/401 instead of 200-with-error-body, and login keeps presence-only email validation.
+- `lib/auth.ts` (credentials provider, 7-day JWT session, trustHost), `app/api/auth/[...nextauth]/route.ts`, `actions/auth.ts` (signUp + Resend notify, login, logout), `lib/validations/user.ts` (Zod 4), `lib/email.ts`, `types/next-auth.d.ts`, and the `LoginForm`/`SignUpForm` + `(auth)/login` & `sign-up` pages all built.
+- **Verified at runtime (dev server + NextAuth REST flow):** seeded user logs in → 302 to `/games`, `/api/auth/session` returns `user.id` with a 7-day `expires`; wrong password → `CredentialsSignin`, session `null`; logout → session `null`. Sign-up data path (bcrypt hash → create → **P2002** duplicate guard, `userGroup` defaults to 1) verified against the DB, and a freshly-created user authenticates through the live flow (proves bcrypt hash compatibility).
+- **Admin email:** not exercised — no `RESEND_API_KEY` set, so `notifyAdminNewUser` no-ops exactly like the legacy guard. Wire a real key in env to enable; the send is also wrapped so a failure never breaks sign-up.
 
 ### Milestone 4 — Game CRUD (API Layer)
 - Implement all four server actions in `actions/games.ts`
@@ -618,9 +620,9 @@ Every layer is typed. `tsconfig.json` must include `"strict": true`. No `any` �
 
 5. **Resend or Nodemailer?** Resend is recommended (simpler SDK, no SMTP config). Nodemailer + an SMTP provider (e.g., Mailgun, Postmark) is an alternative if you have an existing SMTP setup.
 
-6. **Session lifetime.** The legacy effective session is ~60 minutes (JWT `exp`), despite a 7-day cookie (see [Session Lifetime](#session-lifetime-parity)). Decide whether to match it exactly (`maxAge: 60 * 60`, recommended for parity), or take the migration as an opportunity to extend sessions to a more conventional length (e.g., 7 or 30 days). The 7-day cookie suggests a 7-day session may have been the *original intent* — confirm which behavior you actually want before locking in `maxAge`.
+6. ~~**Session lifetime.**~~ **RESOLVED (M3): 7 days.** `session.maxAge = 7 * 24 * 60 * 60`. The legacy 7-day cookie reflected the apparent original intent; the ~60-minute effective session was an accident of the JWT `exp`.
 
-7. **Error-message parity vs. cleanup.** The [Behavior Parity table](#behavior-parity-status-codes--error-messages) preserves legacy strings verbatim. Two legacy quirks are flagged for a yes/no: (a) `/login` validates email *presence* only, not format — keep loose or tighten? (b) `authenticate()` returns HTTP 200 with an error body instead of 401 — the new stack should return a real 401/redirect (recommended). Confirm you want these two corrected rather than reproduced bug-for-bug.
+7. ~~**Error-message parity vs. cleanup.**~~ **RESOLVED (M3): correct both.** (a) Login keeps presence-only email validation (no format tightening). (b) Unauthenticated access returns a real redirect/401 (via Auth.js), not the legacy 200-with-error-body. All other [parity strings](#behavior-parity-status-codes--error-messages) preserved verbatim.
 
 ---
 
