@@ -22,6 +22,7 @@ model User {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   games          Game[]
+  events         Event[]
 
   @@map("users")
 }
@@ -34,6 +35,22 @@ model Game {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events      Event[]  @relation("EventGames")
 
   @@map("games")
+}
+
+// A plan for an event: which games to bring. Many-to-many with Game.
+model Event {
+  id        String    @id @default(cuid())
+  name      String
+  eventDate DateTime?
+  notes     String?
+  userId    String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  games     Game[]    @relation("EventGames")
+
+  @@map("events")
 }
