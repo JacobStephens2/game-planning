@@ -1,8 +1,20 @@
 # Deploy — self-hosted on the VPS
 
 GamePlan runs as a Next.js **standalone** server on `127.0.0.1:3473`, managed by
-systemd, reverse-proxied by Apache, with TLS from certbot. Deployed **parallel**
-to the legacy PHP app (which stays at `gameplan.stephens.page`) until cutover.
+systemd, reverse-proxied by Apache, with TLS from certbot.
+
+**Live at `https://gameplan.stephens.page`** (cut over 2026-06-01 — the legacy PHP
+app was replaced in place). The previous vhosts are backed up at
+`/etc/apache2/sites-available/gameplan.stephens.page*.conf.legacy-bak`; restore
+those + `systemctl reload apache2` to roll back. The legacy app dir
+(`/var/www/gameplan.stephens.page`) and the unused `api.gameplan.stephens.page`
+vhost are still present but no longer served — retire when ready.
+
+### Reverse-proxy requirements (learned in prod)
+- The `:443` vhost must send **`RequestHeader set X-Forwarded-Proto "https"`** and
+  `ProxyPreserveHost On`, so Auth.js sets `__Secure-` cookies and https URLs.
+- **`AUTH_URL` must be pinned** in `.env` to the public origin. Without it Auth.js
+  infers `127.0.0.1:3473` and login redirects to a dead localhost URL.
 
 Database: Postgres `game_planning` on the on-volume PG16 cluster (creds in
 `.env`, gitignored). Build-is-deploy: rebuild → restart.
