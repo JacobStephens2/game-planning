@@ -14,12 +14,12 @@ import {
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ registered?: string }>;
+  searchParams: Promise<{ registered?: string; reset?: string }>;
 }) {
   const session = await auth();
   if (session?.user) redirect("/games");
 
-  const { registered } = await searchParams;
+  const { registered, reset } = await searchParams;
 
   return (
     <main className="flex min-h-screen items-center justify-center p-4">
@@ -34,7 +34,17 @@ export default async function LoginPage({
               Account created — please log in.
             </p>
           )}
+          {reset && (
+            <p className="text-sm text-green-600 dark:text-green-500">
+              Password updated — please log in with your new password.
+            </p>
+          )}
           <LoginForm />
+          <p className="text-sm text-muted-foreground">
+            <Link href="/forgot-password" className="underline underline-offset-4">
+              Forgot your password?
+            </Link>
+          </p>
         </CardContent>
         <CardFooter>
           <p className="text-sm text-muted-foreground">

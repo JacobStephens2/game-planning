@@ -23,8 +23,25 @@ model User {
   updatedAt      DateTime @updatedAt
   games          Game[]
   events         Event[]
+  resetTokens    PasswordResetToken[]
 
   @@map("users")
+}
+
+// One row per outstanding "forgot password" request. We store only the SHA-256
+// hash of the token; the plaintext lives solely in the emailed link, so a DB
+// read can't mint a working reset link. Tokens are single-use (deleted on
+// redeem) and short-lived (see RESET_TOKEN_TTL_MS in actions/auth.ts).
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
 }
 
 model Game {
