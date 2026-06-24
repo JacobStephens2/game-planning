@@ -18,6 +18,9 @@ import {
 // Reset links are good for one hour. We store only the SHA-256 of the token
 // (see the PasswordResetToken model); the plaintext lives only in the email.
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
+// At most one reset email per account per minute, to stop someone spamming a
+// known address with reset mail. Keyed off the outstanding token's createdAt.
+const RESET_THROTTLE_MS = 60 * 1000;
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 export type AuthFormState = {
@@ -98,6 +101,17 @@ export async function requestPasswordReset(formData: FormData): Promise<AuthForm
 
   const user = await db.user.findUnique({ where: { email: parsed.data.email } });
   if (user) {
+    // Per-email throttle: if a reset was issued in the last minute, don't send
+    // another. Return the same success state so the throttle isn't observable
+    // (and so it can't be used to probe which addresses have accounts).
+    const recent = await db.passwordResetToken.findFirst({
+      where: { userId: user.id },
+      orderBy: { createdAt: "desc" },
+    });
+    if (recent && Date.now() - recent.createdAt.getTime() < RESET_THROTTLE_MS) {
+      return {};
+    }
+
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
 
